@@ -1,4 +1,4 @@
-# Go
+# Go build
 /bin/
 /pkg/
 *.exe
@@ -9,11 +9,12 @@
 *.test
 *.out
 
-# Env files
+# Environment files
 .env
 .env.test
+example.env
 
-# IDE
+# IDEs
 .vscode/
 .idea/
 

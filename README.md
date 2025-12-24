@@ -2,11 +2,16 @@
 
 ## Golang PostgreSQL Backend
 
-A backend service built with Go, PostgreSQL, RabbitMQ, and Docker.
+A backend service implemented in Go with PostgreSQL, RabbitMQ, and Docker.
+
+### Tech Stack
+- Go (Echo framework)
+- PostgreSQL (GORM)
+- RabbitMQ
+- Docker & Docker Compose
 
 ### Features
-- REST APIs using Echo
-- PostgreSQL integration via GORM
-- RabbitMQ event publishing
-- Docker & Docker Compose support
+- User CRUD APIs
+- Event-based messaging
 - Environment-based configuration
+- Unit tests
