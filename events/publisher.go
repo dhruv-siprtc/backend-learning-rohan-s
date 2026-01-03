@@ -12,7 +12,6 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// Generic publish function (kept for reference or future use)
 func publish(event UserEvent, routingKey string) {
 	body, _ := json.Marshal(event)
 
@@ -31,6 +30,6 @@ func publish(event UserEvent, routingKey string) {
 	)
 
 	if err != nil {
-		log.Println("❌ Event publish failed:", err)
+		log.Println(" Event publish failed:", err)
 	}
 }
