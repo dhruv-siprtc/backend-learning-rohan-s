@@ -31,38 +31,34 @@ func ConnectRabbitMQ() {
 
 	var err error
 
-	// Increased from 10 to 20 attempts with 5 second intervals = 100 seconds total
 	maxAttempts := 20
 	retryInterval := 5 * time.Second
 
 	for i := 1; i <= maxAttempts; i++ {
 		RabbitConn, err = amqp.Dial(url)
 		if err == nil {
-			log.Println("✅ RabbitMQ connected")
+			log.Println(" RabbitMQ connected")
 			break
 		}
 
-		log.Printf("⏳ RabbitMQ not ready (attempt %d/%d). Retrying in %v...", i, maxAttempts, retryInterval)
+		log.Printf(" RabbitMQ not ready (attempt %d/%d). Retrying in %v...", i, maxAttempts, retryInterval)
 		time.Sleep(retryInterval)
 	}
 
 	if RabbitConn == nil {
-		log.Fatal("❌ RabbitMQ connection failed after retries")
+		log.Fatal(" RabbitMQ connection failed after retries")
 	}
 
-	// Create channel
 	RabbitChannel, err = RabbitConn.Channel()
 	if err != nil {
-		log.Fatal("❌ RabbitMQ channel creation failed:", err)
+		log.Fatal("RabbitMQ channel creation failed:", err)
 	}
 
-	// Read configuration
 	exchange := mustEnv("RABBITMQ_EXCHANGE")
 	dlx := mustEnv("RABBITMQ_DLX")
 	createdQueue := mustEnv("RABBITMQ_CREATED_QUEUE")
 	updatedQueue := mustEnv("RABBITMQ_UPDATED_QUEUE")
 
-	// Declare main exchange
 	if err := RabbitChannel.ExchangeDeclare(
 		exchange,
 		"topic",
@@ -72,10 +68,9 @@ func ConnectRabbitMQ() {
 		false,
 		nil,
 	); err != nil {
-		log.Fatal("❌ Failed to declare exchange:", err)
+		log.Fatal(" Failed to declare exchange:", err)
 	}
 
-	// Declare dead-letter exchange
 	if err := RabbitChannel.ExchangeDeclare(
 		dlx,
 		"fanout",
@@ -85,15 +80,13 @@ func ConnectRabbitMQ() {
 		false,
 		nil,
 	); err != nil {
-		log.Fatal("❌ Failed to declare DLX:", err)
+		log.Fatal(" Failed to declare DLX:", err)
 	}
 
-	// Queue arguments (DLX)
 	args := amqp.Table{
 		"x-dead-letter-exchange": dlx,
 	}
 
-	// Declare queues
 	if _, err := RabbitChannel.QueueDeclare(
 		createdQueue,
 		true,
@@ -102,7 +95,7 @@ func ConnectRabbitMQ() {
 		false,
 		args,
 	); err != nil {
-		log.Fatal("❌ Failed to declare created queue:", err)
+		log.Fatal(" Failed to declare created queue:", err)
 	}
 
 	if _, err := RabbitChannel.QueueDeclare(
@@ -113,10 +106,9 @@ func ConnectRabbitMQ() {
 		false,
 		args,
 	); err != nil {
-		log.Fatal("❌ Failed to declare updated queue:", err)
+		log.Fatal(" Failed to declare updated queue:", err)
 	}
 
-	// Bind queues
 	if err := RabbitChannel.QueueBind(
 		createdQueue,
 		"user.created",
@@ -124,7 +116,7 @@ func ConnectRabbitMQ() {
 		false,
 		nil,
 	); err != nil {
-		log.Fatal("❌ Failed to bind created queue:", err)
+		log.Fatal(" Failed to bind created queue:", err)
 	}
 
 	if err := RabbitChannel.QueueBind(
@@ -134,8 +126,8 @@ func ConnectRabbitMQ() {
 		false,
 		nil,
 	); err != nil {
-		log.Fatal("❌ Failed to bind updated queue:", err)
+		log.Fatal(" Failed to bind updated queue:", err)
 	}
 
-	log.Println("✅ RabbitMQ setup completed successfully")
+	log.Println(" RabbitMQ setup completed successfully")
 }

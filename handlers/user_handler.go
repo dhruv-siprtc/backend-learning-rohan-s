@@ -41,7 +41,6 @@ func CreateUser(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": err.Error()})
 	}
 
-	// Publish user created event
 	event := events.UserEvent{
 		Event:     "USER_CREATED",
 		Version:   "1.0",
@@ -53,10 +52,14 @@ func CreateUser(c echo.Context) error {
 		},
 	}
 
-	eventBody, _ := json.Marshal(event)
-	if err := config.PublishUserCreated(eventBody); err != nil {
-		// Log error but don't fail the request
-		c.Logger().Error("Failed to publish user created event:", err)
+	eventBody, err := json.Marshal(event)
+	if err != nil {
+		c.Logger().Error("Failed to marshal user created event:", err)
+	} else {
+		if err := config.PublishUserCreated(eventBody); err != nil {
+
+			c.Logger().Error("Failed to publish user created event:", err)
+		}
 	}
 
 	return c.JSON(http.StatusCreated, user)
@@ -115,7 +118,14 @@ func UpdateUser(c echo.Context) error {
 		})
 	}
 
-	// Publish user updated event
+	if err := config.DB.
+		Where("id = ? AND deleted_at IS NULL", user.ID).
+		First(&user).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{
+			"error": "Failed to reload user data",
+		})
+	}
+
 	event := events.UserEvent{
 		Event:     "USER_UPDATED",
 		Version:   "1.0",
@@ -127,15 +137,18 @@ func UpdateUser(c echo.Context) error {
 		},
 	}
 
-	eventBody, _ := json.Marshal(event)
-	if err := config.PublishUserUpdated(eventBody); err != nil {
-		c.Logger().Error("Failed to publish user updated event:", err)
+	eventBody, err := json.Marshal(event)
+	if err != nil {
+		c.Logger().Error("Failed to marshal user updated event:", err)
+	} else {
+		if err := config.PublishUserUpdated(eventBody); err != nil {
+			c.Logger().Error("Failed to publish user updated event:", err)
+		}
 	}
 
 	return c.JSON(http.StatusOK, user)
 }
 
-// GetUsers and GetUserByID remain the same...
 func GetUsers(c echo.Context) error {
 	var users []models.User
 	if err := config.DB.Where("deleted_at IS NULL").Find(&users).Error; err != nil {

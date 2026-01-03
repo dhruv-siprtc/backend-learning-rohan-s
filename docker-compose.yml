@@ -1,4 +1,4 @@
-version: "3.9"
+# version: "3.9"
 
 services:
   postgres:
@@ -29,19 +29,18 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     healthcheck:
-      # Better health check that waits for management API
       test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
       interval: 10s
       timeout: 10s
       retries: 10
-      start_period: 60s  # Give RabbitMQ 60 seconds to start before health checks
+      start_period: 60s
 
   api:
     build:
       context: .
       dockerfile: cmd/api/Dockerfile
     env_file:
-      - example.env
+      - .env
     ports:
       - "8080:8080"
     depends_on:
@@ -49,32 +48,30 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    restart: unless-stopped  # Restart if it fails
+    restart: unless-stopped
     deploy:
       restart_policy:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+
   consumer:
     build:
       context: .
       dockerfile: cmd/consumer/Dockerfile
     env_file:
-      - example.env
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    restart: unless-stopped  # Always restart unless manually stopped
+    restart: unless-stopped
     deploy:
       restart_policy:
         condition: on-failure
         delay: 5s
         max_attempts: 3
-
-
-     
 
 volumes:
   postgres_data:

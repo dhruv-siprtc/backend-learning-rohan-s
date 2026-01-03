@@ -18,14 +18,12 @@ func main() {
 	port := os.Getenv("SERVER_PORT")
 
 	if port == "" {
-		log.Fatal("❌ SERVER_PORT is not set")
+		log.Fatal("SERVER_PORT is not set")
 	}
 
-	// Connect to PostgreSQL
 	config.ConnectDB()
 	config.DB.AutoMigrate(&models.User{})
 
-	// Connect to RabbitMQ
 	config.ConnectRabbitMQ()
 	defer config.RabbitConn.Close()
 	defer config.RabbitChannel.Close()
@@ -49,6 +47,6 @@ func main() {
 
 	routes.RegisterRoutes(e)
 
-	log.Printf("🚀 Server running at http://localhost:%s\n", port)
+	log.Printf(" Server running at http://localhost:%s\n", port)
 	log.Fatal(e.Start(":" + port))
 }

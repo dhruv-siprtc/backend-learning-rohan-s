@@ -9,7 +9,7 @@ import (
 )
 
 func HealthCheck(c echo.Context) error {
-	// Check database connection
+
 	sqlDB, err := config.DB.DB()
 	if err != nil {
 		return c.JSON(http.StatusServiceUnavailable, echo.Map{
@@ -27,7 +27,6 @@ func HealthCheck(c echo.Context) error {
 		})
 	}
 
-	// Check RabbitMQ connection
 	if config.RabbitConn == nil || config.RabbitConn.IsClosed() {
 		return c.JSON(http.StatusServiceUnavailable, echo.Map{
 			"status":   "unhealthy",

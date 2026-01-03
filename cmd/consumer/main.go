@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"golang-postgre/config"
 	"golang-postgre/events"
@@ -14,21 +18,38 @@ func main() {
 	_ = godotenv.Load()
 
 	config.ConnectRabbitMQ()
+	defer func() {
+		if config.RabbitChannel != nil {
+			config.RabbitChannel.Close()
+			log.Println("RabbitMQ channel closed")
+		}
+		if config.RabbitConn != nil {
+			config.RabbitConn.Close()
+			log.Println(" RabbitMQ connection closed")
+		}
+	}()
 
-	createdQueue := "user.created.queue"
-	updatedQueue := "user.updated.queue"
+	createdQueue := os.Getenv("RABBITMQ_CREATED_QUEUE")
+	updatedQueue := os.Getenv("RABBITMQ_UPDATED_QUEUE")
+
+	if createdQueue == "" {
+		log.Fatal("RABBITMQ_CREATED_QUEUE not set in environment")
+	}
+	if updatedQueue == "" {
+		log.Fatal(" RABBITMQ_UPDATED_QUEUE not set in environment")
+	}
 
 	createdMsgs, err := config.RabbitChannel.Consume(
 		createdQueue,
 		"created-consumer",
-		false, // manual ack
+		false,
 		false,
 		false,
 		false,
 		nil,
 	)
 	if err != nil {
-		log.Fatal("❌ Failed to consume created queue:", err)
+		log.Fatalf("Failed to consume created queue (%s): %v", createdQueue, err)
 	}
 
 	updatedMsgs, err := config.RabbitChannel.Consume(
@@ -41,42 +62,70 @@ func main() {
 		nil,
 	)
 	if err != nil {
-		log.Fatal("❌ Failed to consume updated queue:", err)
+		log.Fatalf("Failed to consume updated queue (%s): %v", updatedQueue, err)
 	}
 
-	log.Println("📥 Consumer started. Waiting for events...")
+	log.Printf("Consumer started. Listening to queues: %s, %s\n", createdQueue, updatedQueue)
 
-	forever := make(chan bool)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		for msg := range createdMsgs {
-			var event events.UserEvent
+		for {
+			select {
+			case msg, ok := <-createdMsgs:
+				if !ok {
+					log.Println(" Created queue channel closed")
+					return
+				}
 
-			if err := json.Unmarshal(msg.Body, &event); err != nil {
-				log.Println("❌ Invalid message:", err)
-				msg.Nack(false, false)
-				continue
+				var event events.UserEvent
+				if err := json.Unmarshal(msg.Body, &event); err != nil {
+					log.Println("Invalid message in created queue:", err)
+					msg.Nack(false, false)
+					continue
+				}
+
+				log.Printf("[USER_CREATED] Welcome email sent to %s (UserID: %d)\n", event.Data.Email, event.Data.UserID)
+				msg.Ack(false)
+
+			case <-ctx.Done():
+				log.Println(" Stopping created queue consumer...")
+				return
 			}
-
-			log.Printf("[USER_CREATED] Welcome email sent to %s\n", event.Data.Email)
-			msg.Ack(false)
 		}
 	}()
 
 	go func() {
-		for msg := range updatedMsgs {
-			var event events.UserEvent
+		for {
+			select {
+			case msg, ok := <-updatedMsgs:
+				if !ok {
+					log.Println(" Updated queue channel closed")
+					return
+				}
 
-			if err := json.Unmarshal(msg.Body, &event); err != nil {
-				log.Println("❌ Invalid message:", err)
-				msg.Nack(false, false)
-				continue
+				var event events.UserEvent
+				if err := json.Unmarshal(msg.Body, &event); err != nil {
+					log.Println(" Invalid message in updated queue:", err)
+					msg.Nack(false, false)
+					continue
+				}
+
+				log.Printf("[USER_UPDATED] User %d (%s) profile updated\n", event.Data.UserID, event.Data.Email)
+				msg.Ack(false)
+
+			case <-ctx.Done():
+				log.Println("Stopping updated queue consumer...")
+				return
 			}
-
-			log.Printf("[USER_UPDATED] User %d profile updated\n", event.Data.UserID)
-			msg.Ack(false)
 		}
 	}()
 
-	<-forever
+	<-sigChan
+	log.Println("Shutdown signal received, closing connections...")
+	cancel()
 }
