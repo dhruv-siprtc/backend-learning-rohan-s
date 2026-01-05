@@ -1,13 +1,13 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"golang-postgre/config"
 	"golang-postgre/events"
 	"golang-postgre/models"
+	"golang-postgre/producer"
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/crypto/bcrypt"
@@ -19,6 +19,7 @@ func CreateUser(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid request"})
 	}
 
+	// Check if email already exists
 	var count int64
 	config.DB.
 		Model(&models.User{}).
@@ -31,16 +32,19 @@ func CreateUser(c echo.Context) error {
 		})
 	}
 
+	// Hash password
 	hash, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Password encryption failed"})
 	}
 	user.Password = string(hash)
 
+	// Create user in database
 	if err := config.DB.Create(&user).Error; err != nil {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": err.Error()})
 	}
 
+	// Publish USER_CREATED event using Paota
 	event := events.UserEvent{
 		Event:     "USER_CREATED",
 		Version:   "1.0",
@@ -52,13 +56,15 @@ func CreateUser(c echo.Context) error {
 		},
 	}
 
-	eventBody, err := json.Marshal(event)
+	// Get producer instance and publish event
+	prod, err := producer.GetProducer()
 	if err != nil {
-		c.Logger().Error("Failed to marshal user created event:", err)
+		c.Logger().Error("Failed to get producer instance:", err)
+		// Continue - don't fail the request if event publishing fails
 	} else {
-		if err := config.PublishUserCreated(eventBody); err != nil {
-
-			c.Logger().Error("Failed to publish user created event:", err)
+		if err := prod.PublishUserCreated(event); err != nil {
+			c.Logger().Error("Failed to publish USER_CREATED event:", err)
+			// Log but don't fail the request
 		}
 	}
 
@@ -68,12 +74,14 @@ func CreateUser(c echo.Context) error {
 func UpdateUser(c echo.Context) error {
 	var user models.User
 
+	// Find existing user
 	if err := config.DB.
 		Where("id = ? AND deleted_at IS NULL", c.Param("id")).
 		First(&user).Error; err != nil {
 		return c.JSON(http.StatusNotFound, echo.Map{"error": "User not found"})
 	}
 
+	// Parse update request
 	var input struct {
 		Name     string `json:"name"`
 		Email    string `json:"email"`
@@ -83,6 +91,7 @@ func UpdateUser(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid input"})
 	}
 
+	// Check email uniqueness
 	var count int64
 	config.DB.
 		Model(&models.User{}).
@@ -95,6 +104,7 @@ func UpdateUser(c echo.Context) error {
 		})
 	}
 
+	// Prepare updates
 	updates := map[string]interface{}{
 		"name":  input.Name,
 		"email": input.Email,
@@ -110,6 +120,7 @@ func UpdateUser(c echo.Context) error {
 		updates["password"] = string(hash)
 	}
 
+	// Update user in database
 	if err := config.DB.
 		Model(&user).
 		Updates(updates).Error; err != nil {
@@ -118,6 +129,7 @@ func UpdateUser(c echo.Context) error {
 		})
 	}
 
+	// Reload user data to get updated values
 	if err := config.DB.
 		Where("id = ? AND deleted_at IS NULL", user.ID).
 		First(&user).Error; err != nil {
@@ -126,6 +138,7 @@ func UpdateUser(c echo.Context) error {
 		})
 	}
 
+	// Publish USER_UPDATED event using Paota
 	event := events.UserEvent{
 		Event:     "USER_UPDATED",
 		Version:   "1.0",
@@ -137,12 +150,15 @@ func UpdateUser(c echo.Context) error {
 		},
 	}
 
-	eventBody, err := json.Marshal(event)
+	// Get producer instance and publish event
+	prod, err := producer.GetProducer()
 	if err != nil {
-		c.Logger().Error("Failed to marshal user updated event:", err)
+		c.Logger().Error("Failed to get producer instance:", err)
+		// Continue - don't fail the request if event publishing fails
 	} else {
-		if err := config.PublishUserUpdated(eventBody); err != nil {
-			c.Logger().Error("Failed to publish user updated event:", err)
+		if err := prod.PublishUserUpdated(event); err != nil {
+			c.Logger().Error("Failed to publish USER_UPDATED event:", err)
+			// Log but don't fail the request
 		}
 	}
 

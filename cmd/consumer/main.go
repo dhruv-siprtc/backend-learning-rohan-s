@@ -1,131 +1,67 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 
 	"golang-postgre/config"
-	"golang-postgre/events"
+	"golang-postgre/consumer"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	_ = godotenv.Load()
+	// Load environment variables from .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("⚠️  No .env file found, using system environment variables")
+	}
 
-	config.ConnectRabbitMQ()
+	// Initialize configuration
+	if err := config.InitConfig(); err != nil {
+		log.Fatalf("❌ Failed to initialize configuration: %v", err)
+	}
+
+	// Print configuration (for debugging)
+	if config.Config.Server.IsDevelopment() {
+		config.PrintConfig()
+	}
+
+	// Wait for RabbitMQ to be ready (especially important in Docker)
+	if err := config.WaitForRabbitMQ(); err != nil {
+		log.Fatalf("❌ RabbitMQ not ready: %v", err)
+	}
+
+	// Get RabbitMQ configuration
+	rmqConfig := config.Config.RabbitMQ
+
+	// Initialize Paota consumer
+	log.Println("🎧 Initializing consumer...")
+	consumerService, err := consumer.InitializeConsumer(rmqConfig)
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize consumer: %v", err)
+	}
+
+	// Cleanup on shutdown
 	defer func() {
-		if config.RabbitChannel != nil {
-			config.RabbitChannel.Close()
-			log.Println("RabbitMQ channel closed")
-		}
-		if config.RabbitConn != nil {
-			config.RabbitConn.Close()
-			log.Println(" RabbitMQ connection closed")
+		if consumerService != nil {
+			consumerService.Close()
+			log.Println("✅ Consumer closed")
 		}
 	}()
 
-	createdQueue := os.Getenv("RABBITMQ_CREATED_QUEUE")
-	updatedQueue := os.Getenv("RABBITMQ_UPDATED_QUEUE")
+	// Start consuming messages
+	log.Println("🚀 Starting consumer service...")
+	log.Printf("📥 Listening to queues:")
+	log.Printf("   - %s (routing key: %s)", rmqConfig.CreatedQueue, rmqConfig.CreatedRoutingKey)
+	log.Printf("   - %s (routing key: %s)", rmqConfig.UpdatedQueue, rmqConfig.UpdatedRoutingKey)
+	log.Printf("📍 Environment: %s", config.Config.Server.Env)
+	log.Printf("⚙️  Prefetch Count: %d", rmqConfig.PrefetchCount)
+	log.Printf("⚙️  Pool Size: %d", rmqConfig.PoolSize)
 
-	if createdQueue == "" {
-		log.Fatal("RABBITMQ_CREATED_QUEUE not set in environment")
-	}
-	if updatedQueue == "" {
-		log.Fatal(" RABBITMQ_UPDATED_QUEUE not set in environment")
-	}
-
-	createdMsgs, err := config.RabbitChannel.Consume(
-		createdQueue,
-		"created-consumer",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("Failed to consume created queue (%s): %v", createdQueue, err)
+	if err := consumerService.Start(); err != nil {
+		log.Fatalf("❌ Consumer failed to start: %v", err)
 	}
 
-	updatedMsgs, err := config.RabbitChannel.Consume(
-		updatedQueue,
-		"updated-consumer",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("Failed to consume updated queue (%s): %v", updatedQueue, err)
-	}
-
-	log.Printf("Consumer started. Listening to queues: %s, %s\n", createdQueue, updatedQueue)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		for {
-			select {
-			case msg, ok := <-createdMsgs:
-				if !ok {
-					log.Println(" Created queue channel closed")
-					return
-				}
-
-				var event events.UserEvent
-				if err := json.Unmarshal(msg.Body, &event); err != nil {
-					log.Println("Invalid message in created queue:", err)
-					msg.Nack(false, false)
-					continue
-				}
-
-				log.Printf("[USER_CREATED] Welcome email sent to %s (UserID: %d)\n", event.Data.Email, event.Data.UserID)
-				msg.Ack(false)
-
-			case <-ctx.Done():
-				log.Println(" Stopping created queue consumer...")
-				return
-			}
-		}
-	}()
-
-	go func() {
-		for {
-			select {
-			case msg, ok := <-updatedMsgs:
-				if !ok {
-					log.Println(" Updated queue channel closed")
-					return
-				}
-
-				var event events.UserEvent
-				if err := json.Unmarshal(msg.Body, &event); err != nil {
-					log.Println(" Invalid message in updated queue:", err)
-					msg.Nack(false, false)
-					continue
-				}
-
-				log.Printf("[USER_UPDATED] User %d (%s) profile updated\n", event.Data.UserID, event.Data.Email)
-				msg.Ack(false)
-
-			case <-ctx.Done():
-				log.Println("Stopping updated queue consumer...")
-				return
-			}
-		}
-	}()
-
-	<-sigChan
-	log.Println("Shutdown signal received, closing connections...")
-	cancel()
+	// Keep the application running
+	log.Println("✅ Consumer is running. Press Ctrl+C to stop.")
+	select {}
 }

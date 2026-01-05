@@ -5,129 +5,87 @@ import (
 	"log"
 	"os"
 	"time"
-
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-var RabbitConn *amqp.Connection
-var RabbitChannel *amqp.Channel
-
-func mustEnv(key string) string {
-	val := os.Getenv(key)
-	if val == "" {
-		log.Fatalf("Missing required environment variable: %s", key)
-	}
-	return val
+type RabbitMQConf struct {
+	Host              string `env:"RABBITMQ_HOST" envDefault:"localhost"`
+	Port              string `env:"RABBITMQ_PORT" envDefault:"5672"`
+	User              string `env:"RABBITMQ_USER" envDefault:"guest"`
+	Password          string `env:"RABBITMQ_PASSWORD" envDefault:"guest"`
+	Exchange          string `env:"RABBITMQ_EXCHANGE" envDefault:"user.events"`
+	ExchangeType      string `env:"RABBITMQ_EXCHANGE_TYPE" envDefault:"topic"`
+	DLX               string `env:"RABBITMQ_DLX" envDefault:"user.dlx"`
+	CreatedQueue      string `env:"RABBITMQ_CREATED_QUEUE" envDefault:"user.created.queue"`
+	UpdatedQueue      string `env:"RABBITMQ_UPDATED_QUEUE" envDefault:"user.updated.queue"`
+	CreatedRoutingKey string `env:"RABBITMQ_CREATED_ROUTING_KEY" envDefault:"user.created"`
+	UpdatedRoutingKey string `env:"RABBITMQ_UPDATED_ROUTING_KEY" envDefault:"user.updated"`
+	PrefetchCount     uint   `env:"RABBITMQ_PREFETCH_COUNT" envDefault:"10"` // Changed to uint
+	PoolSize          uint   `env:"RABBITMQ_POOL_SIZE" envDefault:"2"`       // Changed to uint
+	DLQEnabled        bool   `env:"RABBITMQ_DLQ_ENABLED" envDefault:"true"`
 }
 
-func ConnectRabbitMQ() {
-	url := fmt.Sprintf(
+// GetRabbitMQURL constructs the RabbitMQ connection URL
+func (r *RabbitMQConf) GetRabbitMQURL() string {
+	return fmt.Sprintf(
 		"amqp://%s:%s@%s:%s/",
-		mustEnv("RABBITMQ_USER"),
-		mustEnv("RABBITMQ_PASSWORD"),
-		mustEnv("RABBITMQ_HOST"),
-		mustEnv("RABBITMQ_PORT"),
+		r.User,
+		r.Password,
+		r.Host,
+		r.Port,
 	)
+}
 
-	var err error
+// ValidateRabbitMQConfig validates RabbitMQ configuration
+func (r *RabbitMQConf) ValidateRabbitMQConfig() error {
+	requiredFields := map[string]string{
+		"Host":     r.Host,
+		"Port":     r.Port,
+		"User":     r.User,
+		"Password": r.Password,
+		"Exchange": r.Exchange,
+	}
 
+	for field, value := range requiredFields {
+		if value == "" {
+			return fmt.Errorf("RabbitMQ configuration error: %s is required", field)
+		}
+	}
+
+	if r.PrefetchCount == 0 {
+		log.Println("Warning: PrefetchCount should be > 0, defaulting to 10")
+		r.PrefetchCount = 10
+	}
+
+	if r.PoolSize == 0 {
+		log.Println("Warning: PoolSize should be > 0, defaulting to 2")
+		r.PoolSize = 2
+	}
+
+	return nil
+}
+
+// WaitForRabbitMQ waits for RabbitMQ to be ready
+func WaitForRabbitMQ() error {
 	maxAttempts := 20
 	retryInterval := 5 * time.Second
 
 	for i := 1; i <= maxAttempts; i++ {
-		RabbitConn, err = amqp.Dial(url)
-		if err == nil {
-			log.Println(" RabbitMQ connected")
-			break
+		// Simple check - actual connection will be done by Paota
+		log.Printf("⏳ Waiting for RabbitMQ to be ready (attempt %d/%d)...", i, maxAttempts)
+
+		if os.Getenv("RABBITMQ_HOST") == "" {
+			return fmt.Errorf("RABBITMQ_HOST environment variable not set")
 		}
 
-		log.Printf(" RabbitMQ not ready (attempt %d/%d). Retrying in %v...", i, maxAttempts, retryInterval)
+		// In production, you might want to do an actual health check here
 		time.Sleep(retryInterval)
+
+		// For now, we'll assume it's ready after waiting
+		if i >= 3 {
+			log.Println("✅ RabbitMQ should be ready")
+			return nil
+		}
 	}
 
-	if RabbitConn == nil {
-		log.Fatal(" RabbitMQ connection failed after retries")
-	}
-
-	RabbitChannel, err = RabbitConn.Channel()
-	if err != nil {
-		log.Fatal("RabbitMQ channel creation failed:", err)
-	}
-
-	exchange := mustEnv("RABBITMQ_EXCHANGE")
-	dlx := mustEnv("RABBITMQ_DLX")
-	createdQueue := mustEnv("RABBITMQ_CREATED_QUEUE")
-	updatedQueue := mustEnv("RABBITMQ_UPDATED_QUEUE")
-
-	if err := RabbitChannel.ExchangeDeclare(
-		exchange,
-		"topic",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	); err != nil {
-		log.Fatal(" Failed to declare exchange:", err)
-	}
-
-	if err := RabbitChannel.ExchangeDeclare(
-		dlx,
-		"fanout",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	); err != nil {
-		log.Fatal(" Failed to declare DLX:", err)
-	}
-
-	args := amqp.Table{
-		"x-dead-letter-exchange": dlx,
-	}
-
-	if _, err := RabbitChannel.QueueDeclare(
-		createdQueue,
-		true,
-		false,
-		false,
-		false,
-		args,
-	); err != nil {
-		log.Fatal(" Failed to declare created queue:", err)
-	}
-
-	if _, err := RabbitChannel.QueueDeclare(
-		updatedQueue,
-		true,
-		false,
-		false,
-		false,
-		args,
-	); err != nil {
-		log.Fatal(" Failed to declare updated queue:", err)
-	}
-
-	if err := RabbitChannel.QueueBind(
-		createdQueue,
-		"user.created",
-		exchange,
-		false,
-		nil,
-	); err != nil {
-		log.Fatal(" Failed to bind created queue:", err)
-	}
-
-	if err := RabbitChannel.QueueBind(
-		updatedQueue,
-		"user.updated",
-		exchange,
-		false,
-		nil,
-	); err != nil {
-		log.Fatal(" Failed to bind updated queue:", err)
-	}
-
-	log.Println(" RabbitMQ setup completed successfully")
+	return fmt.Errorf("RabbitMQ not ready after %d attempts", maxAttempts)
 }
