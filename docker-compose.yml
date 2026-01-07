@@ -1,41 +1,44 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     container_name: postgres
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 123
-      POSTGRES_DB: postgis_36_sample
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
     networks:
       - app-network
 
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.12-management-alpine
     container_name: rabbitmq
     restart: always
+    hostname: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: /
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 10s
-      retries: 10
-      start_period: 60s
+      retries: 15
+      start_period: 40s
     networks:
       - app-network
     volumes:
@@ -46,49 +49,78 @@ services:
       context: .
       dockerfile: cmd/api/Dockerfile
     container_name: api
+    restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Override hosts for Docker network
+      DB_HOST: postgres
+      RABBITMQ_HOST: rabbitmq
     ports:
-      - "8080:8080"
+      - "${SERVER_PORT}:${SERVER_PORT}"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    restart: unless-stopped
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:${SERVER_PORT}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
       restart_policy:
         condition: on-failure
         delay: 5s
-        max_attempts: 3
+        max_attempts: 5
 
   consumer:
     build:
       context: .
       dockerfile: cmd/consumer/Dockerfile
     container_name: consumer
+    restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Override hosts for Docker network
+      DB_HOST: postgres
+      RABBITMQ_HOST: rabbitmq
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    restart: unless-stopped
+      api:
+        condition: service_started
     networks:
       - app-network
     deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
       restart_policy:
         condition: on-failure
-        delay: 5s
-        max_attempts: 3
+        delay: 10s
+        max_attempts: 5
 
 networks:
   app-network:
     driver: bridge
+    name: user-management-network
 
 volumes:
   postgres_data:
+    driver: local
+    name: user-management-postgres
   rabbitmq_data:
+    driver: local
+    name: user-management-rabbitmq

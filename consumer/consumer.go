@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	"golang-postgre/config"
 	"golang-postgre/events"
@@ -18,6 +19,8 @@ type ConsumerService struct {
 	createdWorkerPool workerpool.Pool
 	updatedWorkerPool workerpool.Pool
 	rmqConfig         config.RabbitMQConf
+	wg                sync.WaitGroup
+	cancel            context.CancelFunc
 }
 
 // InitializeConsumer initializes Paota consumers for both queues
@@ -64,7 +67,7 @@ func (c *ConsumerService) initWorkerPool(queueName, routingKey, consumerTag stri
 		AMQP: &paotaconfig.AMQPConfig{
 			Url:                c.rmqConfig.GetRabbitMQURL(),
 			Exchange:           c.rmqConfig.Exchange,
-			ExchangeType:       "topic",
+			ExchangeType:       c.rmqConfig.ExchangeType,
 			BindingKey:         routingKey,
 			PrefetchCount:      int(c.rmqConfig.PrefetchCount),
 			ConnectionPoolSize: int(c.rmqConfig.PoolSize),
@@ -74,9 +77,13 @@ func (c *ConsumerService) initWorkerPool(queueName, routingKey, consumerTag stri
 		},
 	}
 
+	ctx := context.Background()
+
+	// Number of worker goroutines - use PrefetchCount as the worker count
+
 	workerPool, err := workerpool.NewWorkerPoolWithConfig(
-		context.Background(),
-		c.rmqConfig.PrefetchCount,
+		ctx,
+		uint(c.rmqConfig.PrefetchCount), // Fixed: Pass number of workers as int
 		consumerTag,
 		paotaConfig,
 	)
@@ -92,29 +99,41 @@ func (c *ConsumerService) initWorkerPool(queueName, routingKey, consumerTag stri
 	return workerPool, nil
 }
 
-// Start starts consuming messages from both queues
+// Start starts consuming messages from both queues in separate goroutines
 func (c *ConsumerService) Start() error {
-	// Register task handlers for both worker pools
+	// Register task handlers
 	if err := c.registerTaskHandlers(); err != nil {
 		return fmt.Errorf("failed to register task handlers: %w", err)
 	}
 
-	log.Printf("🎧 Starting USER_CREATED consumer for queue: %s", c.rmqConfig.CreatedQueue)
-	log.Printf("🎧 Starting USER_UPDATED consumer for queue: %s", c.rmqConfig.UpdatedQueue)
+	log.Printf("🎧 Starting consumers...")
+	log.Printf("   USER_CREATED queue: %s (routing key: %s)", c.rmqConfig.CreatedQueue, c.rmqConfig.CreatedRoutingKey)
+	log.Printf("   USER_UPDATED queue: %s (routing key: %s)", c.rmqConfig.UpdatedQueue, c.rmqConfig.UpdatedRoutingKey)
 
-	// Start USER_CREATED consumer in a goroutine (non-blocking)
+	// Start USER_CREATED consumer in goroutine
+	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
+		log.Println("🎧 Starting USER_CREATED consumer...")
 		if err := c.createdWorkerPool.Start(); err != nil {
 			log.Printf("❌ USER_CREATED consumer error: %v", err)
 		}
 	}()
 
-	// Start USER_UPDATED consumer in main goroutine (blocking)
-	// This will block until a shutdown signal is received
-	if err := c.updatedWorkerPool.Start(); err != nil {
-		return fmt.Errorf("failed to start USER_UPDATED consumer: %w", err)
-	}
+	// Start USER_UPDATED consumer in goroutine
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		log.Println("🎧 Starting USER_UPDATED consumer...")
+		if err := c.updatedWorkerPool.Start(); err != nil {
+			log.Printf("❌ USER_UPDATED consumer error: %v", err)
+		}
+	}()
 
+	log.Println("✅ Both consumers are running")
+
+	// Wait for all consumers to finish
+	c.wg.Wait()
 	return nil
 }
 
@@ -136,60 +155,65 @@ func (c *ConsumerService) registerTaskHandlers() error {
 		return fmt.Errorf("failed to register USER_UPDATED handler: %w", err)
 	}
 
+	log.Println("✅ Task handlers registered successfully")
 	return nil
 }
 
 // handleUserCreated processes USER_CREATED events
-// Context parameter is required by Paota's task handler signature
 func (c *ConsumerService) handleUserCreated(ctx context.Context, signature *schema.Signature) error {
 	if len(signature.Args) == 0 {
+		log.Printf("❌ [USER_CREATED] No arguments in signature")
 		return fmt.Errorf("no arguments in signature")
 	}
 
 	eventJSON, ok := signature.Args[0].Value.(string)
 	if !ok {
+		log.Printf("❌ [USER_CREATED] Invalid argument type, expected string")
 		return fmt.Errorf("invalid argument type, expected string")
 	}
 
 	var event events.UserEvent
 	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
-		log.Printf("❌ Failed to unmarshal USER_CREATED event: %v", err)
-		return err // Message will be retried or sent to DLQ
+		log.Printf("❌ [USER_CREATED] Failed to unmarshal event: %v", err)
+		return err
 	}
 
 	// Simulate sending welcome email
-	log.Printf("📧 [USER_CREATED] Welcome email sent to %s (UserID: %d)",
+	log.Printf("📧 [USER_CREATED] Welcome email sent to %s (UserID: %d, Name: %s)",
 		event.Data.Email,
 		event.Data.UserID,
+		event.Data.Name,
 	)
 
-	// In production, this would call an actual email service
+	// In production, call actual email service here
 	// Example: emailService.SendWelcomeEmail(ctx, event.Data.Email, event.Data.Name)
 
-	return nil // Message will be acknowledged
+	return nil
 }
 
 // handleUserUpdated processes USER_UPDATED events
-// Context parameter is required by Paota's task handler signature
 func (c *ConsumerService) handleUserUpdated(ctx context.Context, signature *schema.Signature) error {
 	if len(signature.Args) == 0 {
+		log.Printf("❌ [USER_UPDATED] No arguments in signature")
 		return fmt.Errorf("no arguments in signature")
 	}
 
 	eventJSON, ok := signature.Args[0].Value.(string)
 	if !ok {
+		log.Printf("❌ [USER_UPDATED] Invalid argument type, expected string")
 		return fmt.Errorf("invalid argument type, expected string")
 	}
 
 	var event events.UserEvent
 	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
-		log.Printf("❌ Failed to unmarshal USER_UPDATED event: %v", err)
-		return err // Message will be retried or sent to DLQ
+		log.Printf("❌ [USER_UPDATED] Failed to unmarshal event: %v", err)
+		return err
 	}
 
 	// Log user update for audit
-	log.Printf("📝 [USER_UPDATED] User %d (%s) profile updated",
+	log.Printf("📝 [USER_UPDATED] User %d (%s - %s) profile updated",
 		event.Data.UserID,
+		event.Data.Name,
 		event.Data.Email,
 	)
 
@@ -199,14 +223,24 @@ func (c *ConsumerService) handleUserUpdated(ctx context.Context, signature *sche
 	// - Notify other services
 	// - Log to audit trail
 
-	return nil // Message will be acknowledged
+	return nil
 }
 
-// Close closes all consumer connections
+// Close gracefully closes all consumer connections
 func (c *ConsumerService) Close() error {
 	log.Println("🔌 Stopping consumer worker pools...")
-	c.createdWorkerPool.Stop()
-	c.updatedWorkerPool.Stop()
+
+	// Stop both worker pools
+	if c.createdWorkerPool != nil {
+		c.createdWorkerPool.Stop()
+	}
+	if c.updatedWorkerPool != nil {
+		c.updatedWorkerPool.Stop()
+	}
+
+	// Wait for all goroutines to finish
+	c.wg.Wait()
+
 	log.Println("✅ Consumer worker pools stopped")
 	return nil
 }
