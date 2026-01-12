@@ -20,20 +20,25 @@ type ConsumerService struct {
 	updatedWorkerPool workerpool.Pool
 	rmqConfig         config.RabbitMQConf
 	wg                sync.WaitGroup
-	cancel            context.CancelFunc
+	stopChan          chan struct{}
 }
 
 // InitializeConsumer initializes Paota consumers for both queues
 func InitializeConsumer(rmqConfig config.RabbitMQConf) (*ConsumerService, error) {
+	log.Println("🔧 Initializing Paota consumers...")
+
 	if err := rmqConfig.ValidateRabbitMQConfig(); err != nil {
 		return nil, fmt.Errorf("invalid RabbitMQ configuration: %w", err)
 	}
 
 	consumer := &ConsumerService{
 		rmqConfig: rmqConfig,
+		stopChan:  make(chan struct{}),
 	}
 
 	// Initialize USER_CREATED consumer
+	log.Printf("   Creating USER_CREATED consumer pool (queue: %s, routing: %s)",
+		rmqConfig.CreatedQueue, rmqConfig.CreatedRoutingKey)
 	createdWorkerPool, err := consumer.initWorkerPool(
 		rmqConfig.CreatedQueue,
 		rmqConfig.CreatedRoutingKey,
@@ -45,6 +50,8 @@ func InitializeConsumer(rmqConfig config.RabbitMQConf) (*ConsumerService, error)
 	consumer.createdWorkerPool = createdWorkerPool
 
 	// Initialize USER_UPDATED consumer
+	log.Printf("   Creating USER_UPDATED consumer pool (queue: %s, routing: %s)",
+		rmqConfig.UpdatedQueue, rmqConfig.UpdatedRoutingKey)
 	updatedWorkerPool, err := consumer.initWorkerPool(
 		rmqConfig.UpdatedQueue,
 		rmqConfig.UpdatedRoutingKey,
@@ -69,21 +76,20 @@ func (c *ConsumerService) initWorkerPool(queueName, routingKey, consumerTag stri
 			Exchange:           c.rmqConfig.Exchange,
 			ExchangeType:       c.rmqConfig.ExchangeType,
 			BindingKey:         routingKey,
-			PrefetchCount:      int(c.rmqConfig.PrefetchCount),
-			ConnectionPoolSize: int(c.rmqConfig.PoolSize),
-			DelayedQueue:       "",
-			TimeoutQueue:       "",
-			FailedQueue:        c.rmqConfig.DLX,
+			PrefetchCount:      c.rmqConfig.PrefetchCount,
+			ConnectionPoolSize: c.rmqConfig.PoolSize,
+			DelayedQueue:       fmt.Sprintf("%s.delayed", queueName),
+			TimeoutQueue:       c.rmqConfig.TimeoutQueue,
+			FailedQueue:        c.rmqConfig.FailedQueue,
+			HeartBeatInterval:  10,
+			ConnectionTimeout:  5,
 		},
 	}
 
 	ctx := context.Background()
-
-	// Number of worker goroutines - use PrefetchCount as the worker count
-
 	workerPool, err := workerpool.NewWorkerPoolWithConfig(
 		ctx,
-		uint(c.rmqConfig.PrefetchCount), // Fixed: Pass number of workers as int
+		uint(c.rmqConfig.PrefetchCount),
 		consumerTag,
 		paotaConfig,
 	)
@@ -132,7 +138,7 @@ func (c *ConsumerService) Start() error {
 
 	log.Println("✅ Both consumers are running")
 
-	// Wait for all consumers to finish
+	// Wait for stop signal or consumers to finish
 	c.wg.Wait()
 	return nil
 }
@@ -160,20 +166,15 @@ func (c *ConsumerService) registerTaskHandlers() error {
 }
 
 // handleUserCreated processes USER_CREATED events
-func (c *ConsumerService) handleUserCreated(ctx context.Context, signature *schema.Signature) error {
-	if len(signature.Args) == 0 {
-		log.Printf("❌ [USER_CREATED] No arguments in signature")
-		return fmt.Errorf("no arguments in signature")
-	}
-
-	eventJSON, ok := signature.Args[0].Value.(string)
-	if !ok {
-		log.Printf("❌ [USER_CREATED] Invalid argument type, expected string")
-		return fmt.Errorf("invalid argument type, expected string")
+func (c *ConsumerService) handleUserCreated(signature *schema.Signature) error {
+	// Parse event from RawArgs
+	if len(signature.RawArgs) == 0 {
+		log.Printf("❌ [USER_CREATED] No RawArgs in signature")
+		return fmt.Errorf("no RawArgs in signature")
 	}
 
 	var event events.UserEvent
-	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
+	if err := json.Unmarshal(signature.RawArgs, &event); err != nil {
 		log.Printf("❌ [USER_CREATED] Failed to unmarshal event: %v", err)
 		return err
 	}
@@ -186,26 +187,21 @@ func (c *ConsumerService) handleUserCreated(ctx context.Context, signature *sche
 	)
 
 	// In production, call actual email service here
-	// Example: emailService.SendWelcomeEmail(ctx, event.Data.Email, event.Data.Name)
+	// Example: emailService.SendWelcomeEmail(event.Data.Email, event.Data.Name)
 
 	return nil
 }
 
 // handleUserUpdated processes USER_UPDATED events
-func (c *ConsumerService) handleUserUpdated(ctx context.Context, signature *schema.Signature) error {
-	if len(signature.Args) == 0 {
-		log.Printf("❌ [USER_UPDATED] No arguments in signature")
-		return fmt.Errorf("no arguments in signature")
-	}
-
-	eventJSON, ok := signature.Args[0].Value.(string)
-	if !ok {
-		log.Printf("❌ [USER_UPDATED] Invalid argument type, expected string")
-		return fmt.Errorf("invalid argument type, expected string")
+func (c *ConsumerService) handleUserUpdated(signature *schema.Signature) error {
+	// Parse event from RawArgs
+	if len(signature.RawArgs) == 0 {
+		log.Printf("❌ [USER_UPDATED] No RawArgs in signature")
+		return fmt.Errorf("no RawArgs in signature")
 	}
 
 	var event events.UserEvent
-	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
+	if err := json.Unmarshal(signature.RawArgs, &event); err != nil {
 		log.Printf("❌ [USER_UPDATED] Failed to unmarshal event: %v", err)
 		return err
 	}
@@ -237,6 +233,9 @@ func (c *ConsumerService) Close() error {
 	if c.updatedWorkerPool != nil {
 		c.updatedWorkerPool.Stop()
 	}
+
+	// Signal stop
+	close(c.stopChan)
 
 	// Wait for all goroutines to finish
 	c.wg.Wait()

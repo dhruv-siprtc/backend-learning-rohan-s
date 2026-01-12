@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/caarlos0/env/v7"
 )
@@ -19,7 +18,7 @@ type DatabaseConf struct {
 	Host     string `env:"DB_HOST" envDefault:"localhost"`
 	Port     string `env:"DB_PORT" envDefault:"5432"`
 	User     string `env:"DB_USER" envDefault:"postgres"`
-	Password string `env:"DB_PASSWORD" envDefault:""`
+	Password string `env:"DB_PASSWORD" envDefault:"123"`
 	Name     string `env:"DB_NAME" envDefault:"postgis_36_sample"`
 }
 
@@ -60,11 +59,10 @@ func validateConfig() error {
 
 	// Validate Database configuration
 	requiredDBFields := map[string]string{
-		"DB_HOST":     Config.Database.Host,
-		"DB_PORT":     Config.Database.Port,
-		"DB_USER":     Config.Database.User,
-		"DB_PASSWORD": Config.Database.Password,
-		"DB_NAME":     Config.Database.Name,
+		"DB_HOST": Config.Database.Host,
+		"DB_PORT": Config.Database.Port,
+		"DB_USER": Config.Database.User,
+		"DB_NAME": Config.Database.Name,
 	}
 
 	for field, value := range requiredDBFields {
@@ -119,28 +117,4 @@ func PrintConfig() {
 	log.Printf("   RabbitMQ Exchange: %s", Config.RabbitMQ.Exchange)
 	log.Printf("   Prefetch Count: %d", Config.RabbitMQ.PrefetchCount)
 	log.Printf("   Connection Pool Size: %d", Config.RabbitMQ.PoolSize)
-}
-
-// GetRabbitMQURL constructs the RabbitMQ connection URL
-
-// ValidateRabbitMQConfig validates RabbitMQ configuration
-
-// WaitForRabbitMQ waits for RabbitMQ to be ready
-
-// GetEnv returns environment variable value or default
-func GetEnv(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	return value
-}
-
-// MustGetEnv returns environment variable value or panics if not set
-func MustGetEnv(key string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		log.Fatalf("❌ Required environment variable %s is not set", key)
-	}
-	return value
 }

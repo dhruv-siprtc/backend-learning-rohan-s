@@ -1,19 +1,21 @@
+version: '3.8'
+
 services:
+  # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
-    container_name: postgres
-    restart: always
+    container_name: postgres_db
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123
+      POSTGRES_DB: postgis_36_sample
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgis_36_sample"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -21,18 +23,21 @@ services:
     networks:
       - app-network
 
+  # RabbitMQ Message Broker
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
-    container_name: rabbitmq
-    restart: always
+    container_name: rabbitmq_broker
+    restart: unless-stopped
     hostname: rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
       RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
@@ -41,23 +46,45 @@ services:
       start_period: 40s
     networks:
       - app-network
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
 
+  # API Service
   api:
     build:
       context: .
-      dockerfile: cmd/api/Dockerfile
-    container_name: api
+      dockerfile: Dockerfile
+    container_name: user_api
     restart: unless-stopped
-    env_file:
-      - .env
+    command: ["./main", "-mode", "api"]
     environment:
-      # Override hosts for Docker network
+      # Application
+      APP_ENV: development
+      SERVER_PORT: 8080
+      
+      # Database (using service name)
       DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: 123
+      DB_NAME: postgis_36_sample
+      DB_PORT: 5432
+      
+      # RabbitMQ (using service name)
       RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      RABBITMQ_EXCHANGE: user.events
+      RABBITMQ_EXCHANGE_TYPE: direct
+      RABBITMQ_DLX: user.dlx
+      RABBITMQ_CREATED_QUEUE: user.created.queue
+      RABBITMQ_UPDATED_QUEUE: user.updated.queue
+      RABBITMQ_CREATED_ROUTING_KEY: user.created
+      RABBITMQ_UPDATED_ROUTING_KEY: user.updated
+      RABBITMQ_PREFETCH_COUNT: 10
+      RABBITMQ_POOL_SIZE: 2
+      RABBITMQ_FAILED_QUEUE: user.failed.queue
+      RABBITMQ_TIMEOUT_QUEUE: user.timeout.queue
     ports:
-      - "${SERVER_PORT}:${SERVER_PORT}"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,51 +93,47 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:${SERVER_PORT}/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 5
 
+  # Consumer Service
   consumer:
     build:
       context: .
-      dockerfile: cmd/consumer/Dockerfile
-    container_name: consumer
+      dockerfile: Dockerfile
+    container_name: user_consumer
     restart: unless-stopped
-    env_file:
-      - .env
+    command: ["./main", "-mode", "consumer"]
     environment:
-      # Override hosts for Docker network
-      DB_HOST: postgres
+      # Application
+      APP_ENV: development
+      
+      # RabbitMQ (using service name)
       RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      RABBITMQ_EXCHANGE: user.events
+      RABBITMQ_EXCHANGE_TYPE: direct
+      RABBITMQ_DLX: user.dlx
+      RABBITMQ_CREATED_QUEUE: user.created.queue
+      RABBITMQ_UPDATED_QUEUE: user.updated.queue
+      RABBITMQ_CREATED_ROUTING_KEY: user.created
+      RABBITMQ_UPDATED_ROUTING_KEY: user.updated
+      RABBITMQ_PREFETCH_COUNT: 10
+      RABBITMQ_POOL_SIZE: 2
+      RABBITMQ_FAILED_QUEUE: user.failed.queue
+      RABBITMQ_TIMEOUT_QUEUE: user.timeout.queue
     depends_on:
-      postgres:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       api:
         condition: service_started
     networks:
       - app-network
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
 networks:
   app-network:

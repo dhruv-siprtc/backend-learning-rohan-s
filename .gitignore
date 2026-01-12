@@ -21,3 +21,5 @@ example.env
 # OS
 .DS_Store
 Thumbs.db
+
+/cmd

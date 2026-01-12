@@ -25,15 +25,16 @@ type ProducerService struct {
 var (
 	producerInstance *ProducerService
 	producerOnce     sync.Once
+	initError        error
 )
 
 // InitializeProducer initializes separate producer pools for each event type
 func InitializeProducer(rmqConfig config.RabbitMQConf) (*ProducerService, error) {
-	var initErr error
-
 	producerOnce.Do(func() {
+		log.Println("🔧 Initializing Paota producers...")
+
 		if err := rmqConfig.ValidateRabbitMQConfig(); err != nil {
-			initErr = fmt.Errorf("invalid RabbitMQ configuration: %w", err)
+			initError = fmt.Errorf("invalid RabbitMQ configuration: %w", err)
 			return
 		}
 
@@ -42,25 +43,27 @@ func InitializeProducer(rmqConfig config.RabbitMQConf) (*ProducerService, error)
 		}
 
 		// Initialize USER_CREATED producer pool
+		log.Printf("   Creating USER_CREATED producer pool (queue: %s, routing: %s)",
+			rmqConfig.CreatedQueue, rmqConfig.CreatedRoutingKey)
 		createdPool, err := producer.initProducerPool(
 			rmqConfig.CreatedQueue,
 			rmqConfig.CreatedRoutingKey,
-			"user_created_producer",
 		)
 		if err != nil {
-			initErr = fmt.Errorf("failed to initialize USER_CREATED producer: %w", err)
+			initError = fmt.Errorf("failed to initialize USER_CREATED producer: %w", err)
 			return
 		}
 		producer.createdPool = createdPool
 
 		// Initialize USER_UPDATED producer pool
+		log.Printf("   Creating USER_UPDATED producer pool (queue: %s, routing: %s)",
+			rmqConfig.UpdatedQueue, rmqConfig.UpdatedRoutingKey)
 		updatedPool, err := producer.initProducerPool(
 			rmqConfig.UpdatedQueue,
 			rmqConfig.UpdatedRoutingKey,
-			"user_updated_producer",
 		)
 		if err != nil {
-			initErr = fmt.Errorf("failed to initialize USER_UPDATED producer: %w", err)
+			initError = fmt.Errorf("failed to initialize USER_UPDATED producer: %w", err)
 			return
 		}
 		producer.updatedPool = updatedPool
@@ -69,15 +72,15 @@ func InitializeProducer(rmqConfig config.RabbitMQConf) (*ProducerService, error)
 		log.Println("✅ Paota producers initialized successfully")
 	})
 
-	if initErr != nil {
-		return nil, initErr
+	if initError != nil {
+		return nil, initError
 	}
 
 	return producerInstance, nil
 }
 
 // initProducerPool creates a producer pool for a specific queue
-func (p *ProducerService) initProducerPool(queueName, routingKey, tag string) (workerpool.Pool, error) {
+func (p *ProducerService) initProducerPool(queueName, routingKey string) (workerpool.Pool, error) {
 	paotaConfig := paotaconfig.Config{
 		Broker:        "amqp",
 		TaskQueueName: queueName,
@@ -86,19 +89,21 @@ func (p *ProducerService) initProducerPool(queueName, routingKey, tag string) (w
 			Exchange:           p.rmqConfig.Exchange,
 			ExchangeType:       p.rmqConfig.ExchangeType,
 			BindingKey:         routingKey,
-			PrefetchCount:      int(p.rmqConfig.PrefetchCount),
-			ConnectionPoolSize: int(p.rmqConfig.PoolSize),
-			DelayedQueue:       "",
-			TimeoutQueue:       "",
-			FailedQueue:        p.rmqConfig.DLX,
+			PrefetchCount:      p.rmqConfig.PrefetchCount,
+			ConnectionPoolSize: p.rmqConfig.PoolSize,
+			DelayedQueue:       fmt.Sprintf("%s.delayed", queueName),
+			TimeoutQueue:       p.rmqConfig.TimeoutQueue,
+			FailedQueue:        p.rmqConfig.FailedQueue,
+			HeartBeatInterval:  10,
+			ConnectionTimeout:  5,
 		},
 	}
+
 	ctx := context.Background()
-	// Pass nil as context - Paota will handle context internally
 	workerPool, err := workerpool.NewWorkerPoolWithConfig(
 		ctx,
 		1, // Single worker for producer
-		tag,
+		fmt.Sprintf("%s_producer", queueName),
 		paotaConfig,
 	)
 
@@ -153,18 +158,13 @@ func (p *ProducerService) publishEvent(pool workerpool.Pool, event events.UserEv
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
-	// Create task signature
+	// Create task signature with RawArgs
 	signature := &schema.Signature{
 		Name:       eventType,
 		RoutingKey: routingKey,
-		Args: []schema.Arg{
-			{
-				Type:  "string",
-				Value: string(eventJSON),
-			},
-		},
-		RetryCount:   3,
-		RetryTimeout: 30,
+		RawArgs:    eventJSON,
+		RetryCount: 3,
+		Priority:   2,
 	}
 
 	// Send task asynchronously
@@ -175,10 +175,10 @@ func (p *ProducerService) publishEvent(pool workerpool.Pool, event events.UserEv
 	}
 
 	if state != nil {
-		log.Printf("✅ [%s] Event published successfully (UserID: %d, Email: %s, TaskID: %s, Status: %s)",
+		log.Printf("✅ [%s] Event published (UserID: %d, Email: %s, TaskID: %s, Status: %s)",
 			eventType, event.Data.UserID, event.Data.Email, state.Request.UUID, state.Status)
 	} else {
-		log.Printf("⚠️ [%s] Event published but state is nil (UserID: %d)", eventType, event.Data.UserID)
+		log.Printf("⚠️  [%s] Event published but state is nil (UserID: %d)", eventType, event.Data.UserID)
 	}
 
 	return nil
