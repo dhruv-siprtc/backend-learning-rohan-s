@@ -22,4 +22,5 @@ example.env
 .DS_Store
 Thumbs.db
 
-/cmd
+# Project folders
+/cmd/
